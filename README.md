@@ -46,3 +46,17 @@ source .venv/Scripts/activate  # On Windows
 # Install dependencies and run the server
 pip install -r requirements.txt
 uvicorn server:app --host 127.0.0.1 --port 5005
+```
+
+### 2. Launch the VS Code Extension
+Open a new terminal, compile the extension, and launch the host:
+
+```bash
+cd extension/carbonsense
+npm install
+npm run compile
+```
+Once compiled, open the extension/carbonsense folder in VS Code and press F5 to launch the Extension Development Host.
+
+### 🌍 The Mission
+Wasted compute is wasted electricity. By catching unoptimized data pipelines before they hit massive cloud clusters, CarbonSense actively decarbonizes software engineering. Predict locally, verify physically, save globally.
