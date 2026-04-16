@@ -1,0 +1,19 @@
+# Node & VS Code Extension
+node_modules/
+out/
+dist/
+.vscode-test/
+*.vsix
+
+# Python Backend
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+emissions.csv
+
+# OS generated files
+.DS_Store
+Thumbs.db
