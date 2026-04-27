@@ -6,20 +6,28 @@ import numpy as np
 import cpuinfo
 import traceback
 import ast
-import torch
 import platform
 import subprocess
 import os
+import tempfile
+from codecarbon import OfflineEmissionsTracker
+from typing import List
 
-# --- NEW: GOOGLE GEMINI INTEGRATION ---
+# --- GOOGLE GEMINI INTEGRATION ---
 import google.generativeai as genai
 
-# Configure Gemini (It will look for the GEMINI_API_KEY environment variable)
-# For local testing, you can temporarily hardcode it: genai.configure(api_key="YOUR_API_KEY")
+# Using a localized high-quota model string to bypass daily limits
 api_key = os.environ.get("GEMINI_API_KEY")
 if api_key:
-    genai.configure(api_key=api_key) # type: ignore
-    print(">>> 🌌 Google Gemini API Initialized Successfully!")
+    # Explicitly configure to ensure connectivity before startup
+    try:
+        genai.configure(api_key=api_key) # type: ignore
+        # Sanity check call to verify model availability
+        list(genai.list_models()) #type:ignore
+        print(">>> 🌌 Google Gemini API (High-Quota Model) Initialized Successfully!")
+    except Exception as e:
+        print(f">>> ⚠️ Warning: GEMINI_API_KEY initialization failed: {e}")
+        api_key = None # Fallback to mocked data if key fails
 else:
     print(">>> ⚠️ Warning: GEMINI_API_KEY not found. Remediation endpoint will return mocked data.")
 
@@ -27,13 +35,13 @@ app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], # Tells the server to allow the VS Code Webview
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# --- 1. HARDWARE DETECTION & ROUTING ---
+# --- 1. HARDWARE DETECTION (oneDNN/ZenDNN Routing) ---
 def detect_hardware():
     try:
         info = cpuinfo.get_cpu_info()
@@ -54,78 +62,47 @@ cpu_brand, use_onnx = detect_hardware()
 
 # --- HARDWARE TELEMETRY SNIFFER ---
 def get_hardware_specs():
-    # 1. Get CPU
+    device_name = platform.node()
+    cpu_name = "Unknown CPU"
     try:
         info = cpuinfo.get_cpu_info()
         cpu_name = info.get('brand_raw', 'Unknown CPU')
-    except:
-        cpu_name = "Unknown CPU"
+    except: pass
 
-    # 2. Get GPU and VRAM (via PyTorch CUDA)
     gpu_name = "Integrated / CPU Only"
-    if torch.cuda.is_available():
-        try:
-            name = torch.cuda.get_device_name(0)
-            vram_gb = round(torch.cuda.get_device_properties(0).total_memory / (1024**3))
-            gpu_name = f"{name} ({vram_gb} GB VRAM)"
-        except:
-            pass
-
-    # 3. Get Exact Laptop/Motherboard Model (Windows specific)
-    device_name = platform.node()
-    if platform.system() == "Windows":
-        try:
-            cmd = "wmic csproduct get name"
+    try:
+        if platform.system() == "Windows":
+            cmd = "wmic path win32_VideoController get name"
             res = subprocess.check_output(cmd, shell=True).decode().strip().split('\n')
             if len(res) > 1:
-                device_name = res[1].strip()
-        except:
-            pass
+                gpu_name = res[1].strip()
+    except: pass
 
-    if "AMD" in cpu_name.upper():
-        vendor = "AMD"
-    elif "INTEL" in cpu_name.upper():
-        vendor = "INTEL"
-    elif "APPLE" in cpu_name.upper():
-        vendor = "APPLE"
-    else:
-        vendor = "GENERIC"
+    vendor = "AMD" if "AMD" in cpu_name.upper() else "INTEL" if "INTEL" in cpu_name.upper() else "GENERIC"
 
     return {
         "vendor": vendor,
         "device": device_name,
         "cpu": cpu_name,
-        "gpu": gpu_name
+        "gpu": gpu_name,
+        "engine": "oneDNN (Intel Optimized)" if vendor == "INTEL" else "ZenDNN (AMD Optimized)" if vendor == "AMD" else "Standard ONNX Runtime"
     }
 
-# Execute sniffing on startup
 HW_SPECS = get_hardware_specs()
 
-if HW_SPECS['vendor'] == "AMD":
-    engine = "ZenDNN"
-elif HW_SPECS['vendor'] == "INTEL":
-    engine = "oneDNN"
-else:
-    engine = "Standard ONNX Runtime & AST Profiler"
-
-print(f"\n>>> 🖥️ Hardware Detected: {HW_SPECS['vendor']}")
-print(f"    Device: {HW_SPECS['device']}")
-print(f"    CPU:    {HW_SPECS['cpu']}")
-print(f"    GPU:    {HW_SPECS['gpu']}")
-
-# Provide endpoint for the VS Code Extension
+# Endpoint for VS Code Extension
 @app.get("/hardware")
 def hardware_info():
     return HW_SPECS
 
 # --- 2. AWAKEN THE BRAIN (If Supported) ---
 session = None
+input_name = None
 if use_onnx:
     try:
         session = ort.InferenceSession("model.onnx")
         input_name = session.get_inputs()[0].name
-        engine_name = "ZenDNN" if cpu_brand == "AMD" else "oneDNN"
-        print(f">>> 🧠 ONNX Model Loaded Successfully! Routing via {engine_name}.")
+        print(f">>> 🧠 ONNX Model Loaded Successfully! Routing via {HW_SPECS['engine']}.")
     except Exception as e:
         print(f">>> ❌ Error loading ONNX model. Falling back to AST. Error: {e}")
         use_onnx = False
@@ -135,12 +112,11 @@ class CodePayload(BaseModel):
 
 def preprocess_code(code: str) -> np.ndarray:
     max_length = 512
-    # Normalization fix implemented here!
     encoded = [(ord(c) / 255.0) if ord(c) < 256 else 0.0 for c in code[:max_length]]
     padded = encoded + [0.0] * (max_length - len(encoded))
     return np.array([padded], dtype=np.float32)
 
-# --- 3. THE AST FALLBACK (Old Reliable) ---
+# --- 3. AST FALLBACK (Old Reliable) ---
 def fallback_ast_linter(code: str):
     try:
         tree = ast.parse(code)
@@ -157,7 +133,7 @@ def fallback_ast_linter(code: str):
     except Exception as e:
         return {"status": "Error", "score": 0.0, "issues": [{"line": 1, "message": "Syntax Error in code"}]}
 
-# --- 4. THE MASTER SCANNER ---
+# --- 4. THE MASTER SCANNER (Real-time Linter) ---
 @app.post("/scan")
 async def scan_code(payload: CodePayload):
     code = payload.code
@@ -168,18 +144,21 @@ async def scan_code(payload: CodePayload):
             input_data = preprocess_code(code)
             outputs = session.run(None, {input_name: input_data})
             output_array = np.array(outputs[0])
-            score = float(output_array[0][0]) if len(output_array.shape) > 1 else float(output_array[0])            
+            score = float(output_array[0][0]) if len(output_array.shape) > 1 else float(output_array[0])
+
+            # Logic Check: High Score (closer to 1.0) means HIGH CARBON / DIRTY
             if score > 0.50:
                 issues = []
                 lines = code.split('\n')
                 for i, line in enumerate(lines):
-                    if "for " in line or "while " in line: 
+                    # Basic keyword analysis to locate the problem line
+                    if any(kw in line for kw in ["for ", "while ", "iterrows", "itertuples", ".apply("]):
                         issues.append({
                             "line": i + 1,
-                            "message": f"High Carbon Footprint Predicted! (AI Score: {score:.2f} via {cpu_brand})"
+                            "message": f"High Carbon Intensity Predicted! (AI Score: {score:.2f})"
                         })
                 if not issues:
-                     issues.append({"line": 1, "message": f"Inefficient architecture detected (Score: {score:.2f})"})
+                     issues.append({"line": 1, "message": f"Architecture is inefficient (Score: {score:.2f})"})
                 return {"status": "Dirty", "score": score, "issues": issues}
             else:
                 return {"status": "Clean", "score": score, "issues": []}
@@ -205,6 +184,7 @@ async def run_burn_test(payload: CodePayload):
         temp_file_path = temp_file.name
 
     try:
+        # Measure hardware burn with CodeCarbon
         tracker = OfflineEmissionsTracker(country_iso_code="IND", log_level="error")
         tracker.start()
 
@@ -212,11 +192,11 @@ async def run_burn_test(payload: CodePayload):
             ["python", temp_file_path],
             capture_output=True,
             text=True,
-            timeout=10 
+            timeout=20 # Increased timeout for iterrows demos
         )
 
         raw_emissions = tracker.stop()
-        emissions = float(raw_emissions) if raw_emissions is not None else 0.0        
+        emissions = float(raw_emissions) if raw_emissions is not None else 0.0
         energy_kwh = tracker.final_emissions_data.energy_consumed
 
         os.remove(temp_file_path)
@@ -233,58 +213,13 @@ async def run_burn_test(payload: CodePayload):
 
     except subprocess.TimeoutExpired:
         os.remove(temp_file_path)
-        return {"status": "Timeout", "energy_kwh": 0, "emissions_kg": 0, "error": "Code took too long to run."}
+        return {"status": "Timeout", "energy_kwh": 0, "emissions_kg": 0, "error": "Code took too long to run (Safety Timeout)."}
     except Exception as e:
-        if os.path.exists(temp_file_path):
-            os.remove(temp_file_path)
+        if os.path.exists(temp_file_path): os.remove(temp_file_path)
         print(traceback.format_exc())
         return {"status": "Error", "energy_kwh": 0, "emissions_kg": 0, "error": str(e)}
 
-# --- 6. GOOGLE GEMINI REMEDIATION API ---
-@app.post("/remediate")
-async def get_green_code(payload: CodePayload):
-    code = payload.code
-    
-    if not os.environ.get("GEMINI_API_KEY"):
-        return {
-            "status": "Mocked",
-            "suggestion": "# GEMINI API KEY MISSING.\n# Vectorize your loops using numpy or pandas built-in functions to save energy."
-        }
-        
-    try:
-        # Sometimes 'gemini-1.5-pro' is more stable than 'latest' depending on your region
-        model = genai.GenerativeModel('gemini-3.1-flash-lite-preview') # type: ignore        
-        prompt = f"""
-        You are an enterprise GreenOps AI. Your goal is to reduce the carbon footprint of software.
-        Analyze the following Python code, which has been flagged for high energy consumption.
-        Rewrite it to be as computationally efficient as possible using vectorization (numpy/pandas).
-        Only output the optimized Python code. Do not include markdown formatting like ```python.
-
-        Code:
-        {code}
-        """
-        
-        # USE THE ASYNC GENERATOR TO PREVENT FASTAPI TIMEOUTS
-        response = await model.generate_content_async(prompt)
-        optimized_code = response.text.strip()
-        
-        if optimized_code.startswith("```python"):
-            optimized_code = optimized_code[9:]
-        if optimized_code.endswith("```"):
-            optimized_code = optimized_code[:-3]
-            
-        return {
-            "status": "Success",
-            "suggestion": optimized_code.strip()
-        }
-        
-    except Exception as e:
-        # THIS WILL PRINT THE EXACT REASON TO YOUR TERMINAL
-        print(f">>> ⚠️ Gemini API Error: {str(e)}") 
-        return {"status": "Error", "suggestion": f"Failed to connect: {str(e)}"}    
-    
-from typing import List
-
+# --- 6. GOOGLE GEMINI CHAT INTERFACE ---
 class ChatMessage(BaseModel):
     role: str
     text: str
@@ -296,26 +231,38 @@ class ChatPayload(BaseModel):
 
 @app.post("/chat")
 async def ai_chat(payload: ChatPayload):
-    if not os.environ.get("GEMINI_API_KEY"):
-        return {"status": "Error", "response": "GEMINI API KEY MISSING."}
+    if not api_key:
+        return {"status": "Error", "response": "GEMINI API KEY MISSING OR FAILED TO INITIALIZE."}
         
     try:
-        # Using the high-quota model
+        # Use the specialized model
         model = genai.GenerativeModel('gemini-3.1-flash-lite-preview') # type: ignore
         
-        # Convert frontend history into Gemini's format
         gemini_history = []
         for msg in payload.history:
-            # Gemini strictly uses 'user' and 'model' as roles
             role = "user" if msg.role == "user" else "model"
             gemini_history.append({"role": role, "parts": [msg.text]})
             
         chat = model.start_chat(history=gemini_history)
         
-        # Inject the current code context into the user's prompt invisibly
-        prompt = f"Code Context:\n{payload.code}\n\nUser Request: {payload.message}"
+        # POLISH: Refined prompt ensures Gemini is talkative and explains architecture.
+        remediation_context = f"""
+            SYSTEM CONTEXT: You are an enterprise GreenOps AI Assistant.
+            
+            The current Python code has been flagged as highly inefficient with a large carbon footprint.
+            
+            Analyis of Current Code:
+            {payload.code}
+            
+            User's current request: {payload.message}
+            
+            GUIDELINES:
+            1. If the user asks for optimization or is looking at the initial solution, explicitly explain WHY the current code is inefficient (e.g., 'nested loops cause O(n^2) bottlenecks' or 'pandas `.iterrows()` cannot leverage vectorized optimizations').
+            2. Provide the optimized code block (wrapped in standard markdown python backticks).
+            3. Be encouraging but direct about the carbon savings. Do not use generic pleasantries. Focus on technical architecture.
+        """
         
-        response = await chat.send_message_async(prompt)
+        response = await chat.send_message_async(remediation_context)
         
         return {
             "status": "Success",
