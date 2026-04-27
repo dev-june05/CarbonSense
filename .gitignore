@@ -17,3 +17,6 @@ emissions.csv
 # OS generated files
 .DS_Store
 Thumbs.db
+
+# Other heavy files & folders
+dataset/

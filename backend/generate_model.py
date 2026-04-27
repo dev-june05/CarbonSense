@@ -1,37 +1,103 @@
-import torch
-import torch.nn as nn
+import pandas as pd
+import random
+import os
 
-# 1. Define a simple architecture (This expects the 512-length array from our server)
-class DummyCarbonModel(nn.Module):
-    def __init__(self):
-        super().__init__()
-        # Simple Multi-Layer Perceptron (MLP) for testing
-        self.fc1 = nn.Linear(512, 128)
-        self.relu = nn.ReLU()
-        self.fc2 = nn.Linear(128, 1)
-        self.sigmoid = nn.Sigmoid() # Squishes the output to a score between 0.0 and 1.0
+def generate_polarized_dataset(num_samples=1000):
+    data = []
 
-    def forward(self, x):
-        x = self.fc1(x)
-        x = self.relu(x)
-        x = self.fc2(x)
-        return self.sigmoid(x)
+    # --- 1. CRITICAL OFFENDERS (Label: 0.85 - 0.99) ---
+    dirty_patterns = [
+        # 1. The Pandas Iterrows Trap
+        """
+import pandas as pd
+df = pd.DataFrame({'a': range({size}), 'b': range({size})})
+result = []
+for index, row in df.iterrows():
+    result.append(row['a'] + row['b'])
+        """,
+        # 2. Deeply Nested Math Loops
+        """
+matrix = []
+for i in range({size}):
+    row = []
+    for j in range({size}):
+        val = 0
+        for k in range(10):
+            val += (i * j) / (k + 1)
+        row.append(val)
+    matrix.append(row)
+        """,
+        # 3. Massive Manual String Concatenation
+        """
+text_data = ["data"] * {size}
+final_string = ""
+for word in text_data:
+    final_string += word + "-"
+        """,
+        # 4. Unnecessary Type Casting in Loops
+        """
+raw_data = [str(x) for x in range({size})]
+processed = []
+for item in raw_data:
+    if int(item) % 2 == 0:
+        processed.append(float(item) * 3.14)
+        """
+    ]
 
-print("Forging the neural network...")
-model = DummyCarbonModel()
+    # --- 2. OPTIMAL/CLEAN CODE (Label: 0.05 - 0.15) ---
+    clean_patterns = [
+        # 1. Pandas/Numpy Vectorization
+        """
+import pandas as pd
+import numpy as np
+df = pd.DataFrame({'a': range({size}), 'b': range({size})})
+result = df['a'] + df['b']
+        """,
+        # 2. Numpy Matrix Math
+        """
+import numpy as np
+i_vals = np.arange({size})
+j_vals = np.arange({size})
+matrix = np.outer(i_vals, j_vals) * 2.5
+        """,
+        # 3. Optimized String Join
+        """
+text_data = ["data"] * {size}
+final_string = "-".join(text_data)
+        """,
+        # 4. List Comprehensions
+        """
+raw_data = range({size})
+processed = [x * 3.14 for x in raw_data if x % 2 == 0]
+        """
+    ]
 
-# 2. Create a dummy input tensor that perfectly matches what server.py will send
-# Shape: (1 Batch, 512 Characters)
-dummy_input = torch.randn(1, 512)
+    # Generate the dataset
+    print("🧠 Generating Highly Polarized GreenOps Dataset...")
+    for _ in range(num_samples // 2):
+        # Generate a dirty sample
+        size = random.randint(1000, 100000)
+        dirty_code = random.choice(dirty_patterns).replace("{size}", str(size)).strip()
+        # Add slight noise to the score to prevent overfitting (e.g., 0.88 to 0.98)
+        dirty_score = round(random.uniform(0.85, 0.98), 3)
+        data.append({"code": dirty_code, "carbon_score": dirty_score})
 
-# 3. Export the brain to ONNX format
-torch.onnx.export(
-    model, 
-    (dummy_input,), 
-    "model.onnx", 
-    export_params=True,
-    input_names=["input"],   # server.py looks for the first input name
-    output_names=["output"]
-)
+        # Generate a clean sample
+        size = random.randint(1000, 100000)
+        clean_code = random.choice(clean_patterns).replace("{size}", str(size)).strip()
+        # Add slight noise to the score (e.g., 0.05 to 0.15)
+        clean_score = round(random.uniform(0.05, 0.15), 3)
+        data.append({"code": clean_code, "carbon_score": clean_score})
 
-print("✅ Success! 'model.onnx' has been created in your directory.")
+    # Shuffle the dataset so the CNN doesn't learn a pattern of Dirty, Clean, Dirty, Clean
+    random.shuffle(data)
+    
+    df = pd.DataFrame(data)
+    
+    # Save to your dataset folder
+    os.makedirs('dataset', exist_ok=True)
+    df.to_csv('dataset/polarized_training_data.csv', index=False)
+    print(f"✅ Successfully generated {len(df)} polarized samples at dataset/polarized_training_data.csv")
+
+if __name__ == "__main__":
+    generate_polarized_dataset(2000) # Generate 2,000 samples

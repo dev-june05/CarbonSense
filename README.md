@@ -40,8 +40,8 @@ cd backend
 python -m venv .venv
 
 # Activate the virtual environment
-source .venv/Scripts/activate  # On Windows
-# source .venv/bin/activate    # On Mac/Linux
+.venv/Scripts/activate  # On Windows
+source .venv/bin/activate    # On Mac/Linux
 
 # Install dependencies and run the server
 pip install -r requirements.txt

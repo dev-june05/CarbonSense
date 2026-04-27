@@ -9,6 +9,19 @@ import ast
 import torch
 import platform
 import subprocess
+import os
+
+# --- NEW: GOOGLE GEMINI INTEGRATION ---
+import google.generativeai as genai
+
+# Configure Gemini (It will look for the GEMINI_API_KEY environment variable)
+# For local testing, you can temporarily hardcode it: genai.configure(api_key="YOUR_API_KEY")
+api_key = os.environ.get("GEMINI_API_KEY")
+if api_key:
+    genai.configure(api_key=api_key) # type: ignore
+    print(">>> 🌌 Google Gemini API Initialized Successfully!")
+else:
+    print(">>> ⚠️ Warning: GEMINI_API_KEY not found. Remediation endpoint will return mocked data.")
 
 app = FastAPI()
 
@@ -38,9 +51,8 @@ def detect_hardware():
         return "Unknown", False
 
 cpu_brand, use_onnx = detect_hardware()
-print(f">>> 🖥️ Hardware Detected: {cpu_brand.upper()}")
 
-# --- NEW: HARDWARE TELEMETRY SNIFFER ---
+# --- HARDWARE TELEMETRY SNIFFER ---
 def get_hardware_specs():
     # 1. Get CPU
     try:
@@ -110,12 +122,8 @@ def hardware_info():
 session = None
 if use_onnx:
     try:
-        # Note: In a production environment, you would specify the exact providers here.
-        # e.g., providers=['DnnlExecutionProvider'] for Intel oneDNN.
-        # AMD's ZenDNN is usually natively integrated into their specific ONNX Runtime build.
         session = ort.InferenceSession("model.onnx")
         input_name = session.get_inputs()[0].name
-        
         engine_name = "ZenDNN" if cpu_brand == "AMD" else "oneDNN"
         print(f">>> 🧠 ONNX Model Loaded Successfully! Routing via {engine_name}.")
     except Exception as e:
@@ -126,15 +134,14 @@ class CodePayload(BaseModel):
     code: str
 
 def preprocess_code(code: str) -> np.ndarray:
-    # Update this to match your actual training tokenizer!
     max_length = 512
-    encoded = [ord(c) for c in code[:max_length]]
-    padded = encoded + [0] * (max_length - len(encoded))
+    # Normalization fix implemented here!
+    encoded = [(ord(c) / 255.0) if ord(c) < 256 else 0.0 for c in code[:max_length]]
+    padded = encoded + [0.0] * (max_length - len(encoded))
     return np.array([padded], dtype=np.float32)
 
 # --- 3. THE AST FALLBACK (Old Reliable) ---
 def fallback_ast_linter(code: str):
-    print(">>> 🔄 Routing via AST Fallback Logic...")
     try:
         tree = ast.parse(code)
         for node in ast.walk(tree):
@@ -179,48 +186,39 @@ async def scan_code(payload: CodePayload):
                 
         except Exception as e:
             print(f">>> ⚠️ ONNX Inference failed. Falling back to AST. Error: {e}")
-            return fallback_ast_linter(code) # Soft fail into AST
+            return fallback_ast_linter(code) 
             
-    # Route 2: AST Fallback (If CPU is unknown or ONNX crashed)
+    # Route 2: AST Fallback
     else:
         return fallback_ast_linter(code)
-    
+
+# --- 5. THE BURN TEST ---
 from codecarbon import OfflineEmissionsTracker
 import tempfile
-import subprocess
-import os
 
 @app.post("/burn")
 async def run_burn_test(payload: CodePayload):
     code = payload.code
     
-    # 1. Create a temporary Python file to execute
     with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as temp_file:
         temp_file.write(code)
         temp_file_path = temp_file.name
 
     try:
-        # 2. Fire up the CodeCarbon Tracker
-        # We use Offline mode because we only care about local CPU/RAM power, not cloud APIs
         tracker = OfflineEmissionsTracker(country_iso_code="IND", log_level="error")
         tracker.start()
 
-        # 3. Execute the user's code in a subprocess
-        # (Capturing the output so it doesn't mess up our server logs)
         process = subprocess.run(
             ["python", temp_file_path],
             capture_output=True,
             text=True,
-            timeout=10 # Stop it if it runs forever!
+            timeout=10 
         )
 
-        # 4. Stop tracking and get the physics data
         raw_emissions = tracker.stop()
         emissions = float(raw_emissions) if raw_emissions is not None else 0.0        
-        # CodeCarbon returns energy in kWh
         energy_kwh = tracker.final_emissions_data.energy_consumed
 
-        # Clean up the temp file
         os.remove(temp_file_path)
 
         if process.returncode != 0:
@@ -241,3 +239,89 @@ async def run_burn_test(payload: CodePayload):
             os.remove(temp_file_path)
         print(traceback.format_exc())
         return {"status": "Error", "energy_kwh": 0, "emissions_kg": 0, "error": str(e)}
+
+# --- 6. GOOGLE GEMINI REMEDIATION API ---
+@app.post("/remediate")
+async def get_green_code(payload: CodePayload):
+    code = payload.code
+    
+    if not os.environ.get("GEMINI_API_KEY"):
+        return {
+            "status": "Mocked",
+            "suggestion": "# GEMINI API KEY MISSING.\n# Vectorize your loops using numpy or pandas built-in functions to save energy."
+        }
+        
+    try:
+        # Sometimes 'gemini-1.5-pro' is more stable than 'latest' depending on your region
+        model = genai.GenerativeModel('gemini-3.1-flash-lite-preview') # type: ignore        
+        prompt = f"""
+        You are an enterprise GreenOps AI. Your goal is to reduce the carbon footprint of software.
+        Analyze the following Python code, which has been flagged for high energy consumption.
+        Rewrite it to be as computationally efficient as possible using vectorization (numpy/pandas).
+        Only output the optimized Python code. Do not include markdown formatting like ```python.
+
+        Code:
+        {code}
+        """
+        
+        # USE THE ASYNC GENERATOR TO PREVENT FASTAPI TIMEOUTS
+        response = await model.generate_content_async(prompt)
+        optimized_code = response.text.strip()
+        
+        if optimized_code.startswith("```python"):
+            optimized_code = optimized_code[9:]
+        if optimized_code.endswith("```"):
+            optimized_code = optimized_code[:-3]
+            
+        return {
+            "status": "Success",
+            "suggestion": optimized_code.strip()
+        }
+        
+    except Exception as e:
+        # THIS WILL PRINT THE EXACT REASON TO YOUR TERMINAL
+        print(f">>> ⚠️ Gemini API Error: {str(e)}") 
+        return {"status": "Error", "suggestion": f"Failed to connect: {str(e)}"}    
+    
+from typing import List
+
+class ChatMessage(BaseModel):
+    role: str
+    text: str
+
+class ChatPayload(BaseModel):
+    code: str
+    history: List[ChatMessage]
+    message: str
+
+@app.post("/chat")
+async def ai_chat(payload: ChatPayload):
+    if not os.environ.get("GEMINI_API_KEY"):
+        return {"status": "Error", "response": "GEMINI API KEY MISSING."}
+        
+    try:
+        # Using the high-quota model
+        model = genai.GenerativeModel('gemini-3.1-flash-lite-preview') # type: ignore
+        
+        # Convert frontend history into Gemini's format
+        gemini_history = []
+        for msg in payload.history:
+            # Gemini strictly uses 'user' and 'model' as roles
+            role = "user" if msg.role == "user" else "model"
+            gemini_history.append({"role": role, "parts": [msg.text]})
+            
+        chat = model.start_chat(history=gemini_history)
+        
+        # Inject the current code context into the user's prompt invisibly
+        prompt = f"Code Context:\n{payload.code}\n\nUser Request: {payload.message}"
+        
+        response = await chat.send_message_async(prompt)
+        
+        return {
+            "status": "Success",
+            "response": response.text.strip()
+        }
+        
+    except Exception as e:
+        print(f">>> ⚠️ Gemini Chat Error: {str(e)}")
+        return {"status": "Error", "response": f"Failed to connect: {str(e)}"}

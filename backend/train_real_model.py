@@ -3,66 +3,29 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
 import numpy as np
-from datasets import load_dataset
+import pandas as pd
 from tqdm import tqdm
-import ast
 
 MAX_LENGTH = 512
 
-# --- 1. THE AUTO-LABELER (The Secret Sauce) ---
-def generate_carbon_score(code_string):
-    """
-    Acts as a 'virtual judge' to grade the raw Hugging Face code.
-    Scores range from 0.1 (Clean/Efficient) to 1.0 (Dirty/High Carbon).
-    """
-    score = 0.1  # Base score for existing
-    try:
-        tree = ast.parse(code_string)
-        for node in ast.walk(tree):
-            # Penalty for loops
-            if isinstance(node, (ast.For, ast.While)):
-                score += 0.15
-                # Heavy penalty for nested loops O(n^2)
-                for child in ast.walk(node):
-                    if isinstance(child, (ast.For, ast.While)) and child != node:
-                        score += 0.35
-            # Penalty for massive hardcoded arrays
-            if isinstance(node, (ast.List, ast.Dict)) and len(getattr(node, 'elts', [])) > 50:
-                score += 0.1
-    except SyntaxError:
-        # If the scraped GitHub code is broken, give it a penalty
-        score = 0.6
-        
-    return min(score, 1.0) # Cap at 1.0
+# --- 1. LOAD & PROCESS POLARIZED DATASET ---
+print(">>> 📥 Loading Polarized GreenOps Dataset...")
+# Read the CSV we just generated
+df = pd.read_csv('dataset/polarized_training_data.csv')
 
-# --- 2. LOAD & PROCESS HUGGING FACE DATASET ---
-print(">>> 📥 Downloading Hugging Face Dataset (jtatman/python-code-dataset-500k)...")
-# Note: The first time you run this, it will take a few minutes to download!
-dataset = load_dataset("jtatman/python-code-dataset-500k", split="train")
+# Extract the code and the explicit scores
+train_texts = df['code'].astype(str).tolist()
+train_labels = df['carbon_score'].astype(float).tolist()
 
-print(">>> 🗄️ Sampling 10,000 scripts for initial training...")
-# We shuffle and select 10k to keep training fast for testing. 
-# Once it works, you can increase this to 100k+!
-small_ds = dataset.shuffle(seed=42).select(range(10000))
+print(f">>> 🗄️ Loaded {len(train_texts)} highly polarized code samples.")
 
-train_texts = []
-train_labels = []
-
-print(">>> 🏷️ Auto-Labeling dataset using AST Heuristics...")
-for row in tqdm(small_ds, desc="Labeling Code"):
-    # The dataset usually stores the code under the 'text' key
-    code = dict(row).get('output', '')    
-    if not code: continue
-
-    score = generate_carbon_score(code)
-    train_texts.append(code)
-    train_labels.append(score)
-
-# --- 3. PREPROCESS TENSORS FOR THE CNN ---
+# --- 2. PREPROCESS TENSORS FOR THE CNN ---
 def preprocess_batch(texts):
     batch_data = []
     for text in texts:
-        encoded = [ord(c) if ord(c) < 256 else 0 for c in text[:MAX_LENGTH]]
+        # Convert characters to ASCII integers, pad with 0s to MAX_LENGTH
+        # NORMALIZATION FIX: Divide by 255.0 to keep inputs between 0 and 1
+        encoded = [(ord(c) / 255.0) if ord(c) < 256 else 0.0 for c in text[:MAX_LENGTH]]
         padded = encoded + [0] * (MAX_LENGTH - len(encoded))
         batch_data.append(padded)
     return torch.tensor(batch_data, dtype=torch.float32)
@@ -74,7 +37,7 @@ y_train = torch.tensor(train_labels, dtype=torch.float32).unsqueeze(1)
 dataset = TensorDataset(X_train, y_train)
 dataloader = DataLoader(dataset, batch_size=64, shuffle=True)
 
-# --- 4. THE 1D-CNN ARCHITECTURE ---
+# --- 3. THE 1D-CNN ARCHITECTURE ---
 class CarbonCNN(nn.Module):
     def __init__(self):
         super(CarbonCNN, self).__init__()
@@ -100,12 +63,12 @@ class CarbonCNN(nn.Module):
 
 model = CarbonCNN()
 
-# --- 5. THE TRAINING LOOP ---
+# --- 4. THE TRAINING LOOP ---
 criterion = nn.MSELoss()
 optimizer = optim.Adam(model.parameters(), lr=0.001)
-epochs = 5
+epochs = 8 # Bumped up slightly for better convergence on the smaller dataset
 
-print(">>> 🚀 Starting Training on Ryzen...")
+print(">>> 🚀 Starting Training on Polarized Data...")
 for epoch in range(epochs):
     model.train()
     running_loss = 0.0
@@ -118,7 +81,7 @@ for epoch in range(epochs):
         running_loss += loss.item()
     print(f"Epoch {epoch+1} Loss: {running_loss/len(dataloader):.4f}")
 
-# --- 6. EXPORT TO ONNX ---
+# --- 5. EXPORT TO ONNX ---
 print(">>> 💾 Exporting trained model to ONNX...")
 model.eval()
 dummy_input = torch.zeros(1, MAX_LENGTH) 
@@ -132,4 +95,4 @@ torch.onnx.export(
     dynamic_axes={'input': {0: 'batch_size'}, 'output': {0: 'batch_size'}}
 )
 
-print(">>> ✅ Real 1D-CNN 'model.onnx' successfully forged!")
+print(">>> ✅ Highly Polarized 1D-CNN 'model.onnx' successfully forged!")
