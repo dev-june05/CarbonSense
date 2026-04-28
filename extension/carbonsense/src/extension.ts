@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import * as http from 'http';
+import * as https from 'https';
 
 const diagnosticCollection = vscode.languages.createDiagnosticCollection('carbonLinter');
 const greenSquiggle = vscode.window.createTextEditorDecorationType({
@@ -7,13 +7,13 @@ const greenSquiggle = vscode.window.createTextEditorDecorationType({
 });
 let currentPanel: vscode.WebviewPanel | undefined = undefined;
 
-// Node.js HTTP wrapper to bypass TS/fetch issues
+// Secure Node.js HTTPS wrapper for Cloud Run
 function postData(path: string, payload: any): Promise<any> {
     return new Promise((resolve, reject) => {
         const dataString = JSON.stringify(payload);
         const options = {
-            hostname: '127.0.0.1',
-            port: 5005,
+            hostname: 'carbonsense-api-gud554ysaq-uc.a.run.app', // <-- YOUR LIVE CLOUD URL
+            port: 443, // <-- Secure HTTPS Port
             path: path,
             method: 'POST',
             headers: {
@@ -22,7 +22,7 @@ function postData(path: string, payload: any): Promise<any> {
             },
             timeout: 30000 
         };
-        const req = http.request(options, (res: any) => {
+        const req = https.request(options, (res: any) => {
             let responseBody = '';
             res.on('data', (chunk: any) => responseBody += chunk);
             res.on('end', () => {
@@ -362,7 +362,7 @@ function getWebviewContent() {
             });
         });
 
-        fetch('http://127.0.0.1:5005/hardware').then(r => r.json()).then(hw => {
+        fetch('https://carbonsense-api-gud554ysaq-uc.a.run.app/hardware').then(r => r.json()).then(hw => {
             document.getElementById('ui-device').textContent = hw.device;
             document.getElementById('ui-cpu').textContent = hw.cpu;
             document.getElementById('ui-gpu').textContent = hw.gpu;
